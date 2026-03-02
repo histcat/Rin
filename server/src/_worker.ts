@@ -1,6 +1,20 @@
 import { drizzle } from "drizzle-orm/d1";
-import { createApp, createDefaultApp } from "./server";
+import { createHonoApp } from "./core/hono-app";
 import { CacheImpl } from "./utils/cache";
+import { FaviconService } from "./services/favicon";
+import { Hono } from "hono";
+import type { Variables } from "hono/types";
+import { initContainerMiddleware, timingMiddleware } from "./core/hono-middleware";
+
+// Create app instance (singleton)
+let app: ReturnType<typeof createHonoApp> | null = null;
+
+function getApp() {
+    if (!app) {
+        app = createHonoApp();
+    }
+    return app;
+}
 
 export default {
     async fetch(
@@ -10,30 +24,24 @@ export default {
         const url = new URL(request.url);
         const path = url.pathname;
 
-        // Handle RSS feeds directly (native RSS support at root path)
-        // Matches: /rss.xml, /atom.xml, /rss.json, /feed.json, /feed.xml
-        if (path.match(/^\/(rss\.xml|atom\.xml|rss\.json|feed\.json|feed\.xml)$/)) {
-            const app = await createApp(env, path);
-            if (app) {
-                return await app.handle(request, env);
-            }
-            return new Response('RSS Feed Not Found', { status: 404 });
+        if (path.startsWith('/favicon.ico')) {
+
+            const app = new Hono<{
+                Bindings: Env;
+                Variables: Variables;
+            }>();
+        
+            app.use('*', timingMiddleware);
+            app.use('*', initContainerMiddleware);
+            app.route('/', FaviconService());
+            return await app.fetch(request, env);
         }
 
-        // Try API routes first (all APIs are under /api/)
-        if (path.startsWith('/api/')) {
-            // Remove /api prefix before passing to services
-            const apiPath = path.slice(4); // removes '/api'
-            const app = await createApp(env, apiPath);
-            if (app) {
-                // Create a new request with the modified URL (without /api prefix)
-                // so that router.handle() can match routes correctly
-                const modifiedUrl = new URL(apiPath + url.search, url.origin);
-                const modifiedRequest = new Request(modifiedUrl, request);
-                return await app.handle(modifiedRequest, env);
-            }
-            // API path not found, return 404
-            return new Response('Not Found', { status: 404 });
+        // Handle RSS feeds directly (native RSS support at root path)
+        // Matches: /rss.xml, /atom.xml, /rss.json, /feed.json, /feed.xml
+        if (path.match(/^\/(rss\.xml|atom\.xml|rss\.json|feed\.json|feed\.xml)$/) || path.startsWith('/api/')) {
+            const honoApp = getApp();
+            return await honoApp.fetch(request, env);
         }
 
         // Serve static assets (for files with extensions)
@@ -63,9 +71,8 @@ export default {
             }
         }
 
-        // Fallback to default app
-        const defaultApp = createDefaultApp(env);
-        return await defaultApp.handle(request, env);
+        // Fallback: return a simple hello
+        return new Response('Hi', { status: 200 });
     },
 
     async scheduled(
